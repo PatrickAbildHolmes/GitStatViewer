@@ -14,6 +14,7 @@ function App() {
     const [repoTracked, setRepoTracked] = useState(false); // Boolean to control whether to show repo info
     const [commits, setCommits] = useState([]);
     const [chartData, setChartData] = useState([]);
+    const [totalLines, setTotalLines] = useState();
     const pollingInterval = useRef(null);
 
     // Requests the backend to do the API call
@@ -44,42 +45,66 @@ function App() {
             const sorted = [...response.data].sort(
                 (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
             );
+            // if (sorted.length === 0) return; // Guard against empty commits, to protect percentage numbers
+
             setCommits(sorted);
             generateChartData(sorted);
-            const stats = computeStats(sorted);
-            setRepoStats(stats);
+            // const stats = computeStats(sorted);
+            // setRepoStats(stats);
+            setRepoStats(computeStats(sorted));
         } catch (err) {
             console.error('Polling error:', err);
         }
     };
 
     const computeStats = (commits) => {
+        if (!commits || commits.length === 0) { // Guard against empty commits (which happens whenever a poll doesn't return a commit)
+            return { totalCommits: 0, authors: [] }; // Needed to not reset percentage numbers
+        }
         const totalCommits = commits.length;
         const authorStats = {};
+        let totalLinesChanged = 0;
+        const normalizeName = (name) => name.replace(/\s+/g, '').toLowerCase();// Helper-function to normalize name.
+        // Without it, you end up with both "Patrick Holmes" and "PatrickHolmes" as separate authors, which is hilarious
+
         for (const commit of commits) {
-            const { author, additions, deletions } = commit;
-            if (!authorStats[author]) {
-                authorStats[author] = {
+            const rawName = commit.author;
+            const normalized = normalizeName(rawName);
+            const { additions, deletions } = commit;
+            if (!authorStats[normalized]) {
+                authorStats[normalized] = {
+                    author: rawName,
                     commits: 0,
                     additions: 0,
                     deletions: 0,
                 };
             }
-            authorStats[author].commits += 1;
-            authorStats[author].additions += additions;
-            authorStats[author].deletions += deletions;
+            authorStats[normalized].commits += 1;
+            authorStats[normalized].additions += additions;
+            authorStats[normalized].deletions += deletions;
+            totalLinesChanged += additions + deletions;
         }
 
-        const authors = Object.entries(authorStats).map(([author, stats]) => ({
-            author,
-            commits: stats.commits,
-            additions: stats.additions,
-            deletions: stats.deletions,
-            avgLinesChanged: ((stats.additions + stats.deletions) / stats.commits).toFixed(2),
-        })).sort((a, b) => b.commits - a.commits);
+        const authors = Object.values(authorStats).map((stats) => {
+            const linesChanged = stats.additions + stats.deletions;
+            return {
+                author: stats.author,
+                commits: stats.commits,
+                additions: stats.additions,
+                deletions: stats.deletions,
+                avgLinesChanged: (linesChanged / stats.commits).toFixed(2),
+                commitPercent: ((stats.commits / totalCommits) * 100).toFixed(1),
+                changePercent: totalLinesChanged > 0
+                    ? ((linesChanged / totalLinesChanged) * 100).toFixed(1)
+                    : '0.0',
+            };
+        });
+
+        authors.sort((a, b) => b.commits - a.commits);
 
         return { totalCommits, authors };
     };
+
 
     const generateChartData = (commitList) => {
         let totalLines = 0;
@@ -120,6 +145,7 @@ function App() {
             cursor.setDate(cursor.getDate() + 1); // go to next day
         }
         setChartData(data);
+        setTotalLines(totalLines);
     };
 
     const startPolling = (owner, repo) => {
@@ -129,6 +155,8 @@ function App() {
             pollCommits(owner, repo);
         }, 5000);
     };
+
+    // Hook to update the repo stats from historical data, even though no new commits have come in
 
     return (
         <div style={{
@@ -159,7 +187,7 @@ function App() {
                                 <p>No commits found yet.</p>
                             ) : (
                                 <ul>
-                                    {[...commits].reverse().map((commit) => (
+                                    {[...commits].slice(-5).reverse().map((commit) => (
                                         <li key={commit.sha} style={{marginBottom: '1rem'}}>
                                             <strong>Author:</strong> {commit.author}<br/>
                                             <strong>Date:</strong> {new Date(commit.timestamp).toLocaleString()}<br/>
@@ -178,19 +206,23 @@ function App() {
 
             {/*Center block: Codebase chart*/}
             <div style={{flex: 2, marginTop: '6rem'}}>
-                <h2>Codebase Size</h2>
-                {chartData.length === 0 ? (
-                    <p>Loading chart...</p>
-                ) : (
-                    <ResponsiveContainer width="100%" height={600}>
-                        <LineChart data={chartData}>
-                            <CartesianGrid strokeDasharray="3 3"/>
-                            <XAxis dataKey="name"/>
-                            <YAxis label={{value: 'Lines of Code', angle: -90, position: 'insideLeft'}}/>
-                            <Tooltip/>
-                            <Line type="monotone" dataKey="lines" stroke="#8884d8" strokeWidth={2}/>
-                        </LineChart>
-                    </ResponsiveContainer>
+                {repoTracked && (
+                    <div>
+                        <h2>Codebase Size</h2>
+                        {chartData.length === 0 ? (
+                            <p>Loading chart...</p>
+                        ) : (
+                            <ResponsiveContainer width="100%" height={600}>
+                                <LineChart data={chartData}>
+                                    <CartesianGrid strokeDasharray="3 3"/>
+                                    <XAxis dataKey="name"/>
+                                    <YAxis label={{value: 'Lines of Code', angle: -90, position: 'insideLeft'}}/>
+                                    <Tooltip/>
+                                    <Line type="monotone" dataKey="lines" stroke="#8884d8" strokeWidth={2}/>
+                                </LineChart>
+                            </ResponsiveContainer>
+                        )}
+                    </div>
                 )}
             </div>
 
@@ -199,18 +231,21 @@ function App() {
                 <div style={{flex: 1, marginLeft: '8rem', overflowY: 'auto'}}>
                     <h2>Repository Summary</h2>
                     <p><strong>Total Commits:</strong> {repoStats.totalCommits}</p>
+                    <p><strong>Approximate repo size:</strong> {totalLines} lines</p>
                     <h3>Author Contributions:</h3>
                     <ul style={{listStyleType: 'none', paddingLeft: 0}}>
                         {repoStats.authors.map((a) => (
                             <li key={a.author}
                                 style={{marginBottom: '1.5rem', padding: '0.5rem 0', borderBottom: '1px solid #ccc'}}>
-                                <div><strong>Author: </strong> {a.author}</div>
-                                <div><strong>Commits: </strong> {a.commits}</div>
-                                <div><strong>Additions: </strong><strong
-                                    style={{color: 'green'}}>+{a.additions}</strong></div>
-                                <div><strong>Deletions: </strong><strong style={{color: 'red'}}>-{a.deletions}</strong>
+                                <div><strong>Author:</strong> {a.author}</div>
+                                <div><strong>Commits:</strong> {a.commits} ({a.commitPercent ?? '0.0'}%)</div>
+                                <div>
+                                    <strong style={{color: 'green'}}>+{a.additions}</strong>
+                                    <span> / </span>
+                                    <strong style={{color: 'red'}}>-{a.deletions}</strong>
+                                    <span> ({a.changePercent ?? '0.0'}% of code changes)</span>
                                 </div>
-                                <div><strong>Avg change: </strong> {a.avgLinesChanged} lines/commit</div>
+                                <div><strong>Avg change:</strong> {a.avgLinesChanged} lines/commit</div>
                             </li>
                         ))}
                     </ul>
