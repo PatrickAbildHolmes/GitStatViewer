@@ -52,6 +52,7 @@ app.post('/track-repo', async (req, res) => {
         // Get 5 latest commits.
         // Includes `sha`, and (not guaranteed) author.name, author.login (username) & author.date
         // Details like additions, deletions and files changed are retrieved using the `sha` with helper-method `insertCommitDetails()`
+        console.log('GitHub token:', process.env.GITHUB_TOKEN);
         const latestResponse = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits`, {
             headers: APIHeader,
             params: { per_page: 5 },
@@ -70,6 +71,7 @@ app.post('/track-repo', async (req, res) => {
         if (newShas.length === 5) {
             console.log(`[${fullRepo}] No overlap found. Fetching full history.`);
             await fetchFullHistory(owner, repo, fullRepo);
+            await addMissingStats(owner, repo, fullRepo); // Add 'additions' and 'deletions' if they're missing
         }
         // Else add the new commits
         else if (newShas.length > 0) {
@@ -108,8 +110,11 @@ app.get('/commits/:owner/:repo', async (request, response) => {
 
 // ----- Helper methods -----
 async function fetchFullHistory(owner, repo, fullRepo) {
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
     let page = 1;
-    const perPage = 100;
+    const perPage = 10;
     let hasMore = true;
     // Continuously requests 100 results (commits) per page, increasing page number by 1 every iteration
     // If the retrieved page has 100 results, `hasMore` stays true and the iteration continues
@@ -124,18 +129,46 @@ async function fetchFullHistory(owner, repo, fullRepo) {
         for (const commit of commits) {
             const sha = commit.sha;
             const exists = await prisma.repoCommit.findUnique({ where: { sha } });
-            if (!exists) await insertCommitDetails(owner, repo, sha, fullRepo);
+            if (!exists) {
+                await insertCommitDetails(owner, repo, sha, fullRepo);
+                await sleep(100); // GitHub API allows a max of 15 requests per second. We restrict to 10 for safety.
+            }
         }
         hasMore = commits.length === perPage;
         page++;
     }
 }
+
+// In the event the database have stored all commits, but for some reason didn't
+// store them correctly (development, yay), this will fill out the missing details like additions and deletions,
+// used for frontend charts and stats.
+async function addMissingStats(owner, repo, fullRepo) {
+    const incompleteCommits = await prisma.repoCommit.findMany({
+        where: {
+            repo: fullRepo,
+            OR: [
+                { additions: { equals: null } },
+                { deletions: { equals: null } },
+            ],
+        },
+        select: { sha: true }
+    });
+
+    for (const { sha } of incompleteCommits) {
+        await insertCommitDetails(owner, repo, sha, fullRepo);
+    }
+
+    console.log(`Backfilled ${incompleteCommits.length} incomplete commits for ${fullRepo}`);
+}
+
 // Commits are initially retrieved with just sha, message and maybe author details.
 // This method uses the ´sha` to retrieve the details used for analysis/presentation in frontend
 // And actually inserts new commits into the database
 async function insertCommitDetails(owner, repo, sha, fullRepo) {
     try {
-        const detail = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`);
+        const detail = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`, {
+            headers: APIHeader,
+        });
         const stats = detail.data.stats;
         const author = detail.data.commit?.author?.name || 'Unknown';
         const timestamp = new Date(detail.data.commit?.author?.date || Date.now());
