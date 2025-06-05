@@ -18,8 +18,8 @@ model RepoCommit {
   repo       String  // "owner/repo", not just "owner" or "repo".
   author     String // commit author, not owner
   timestamp  DateTime
-  additions  Int
-  deletions  Int
+  additions  Int?
+  deletions  Int?
 }
 
 

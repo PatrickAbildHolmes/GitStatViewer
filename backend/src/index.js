@@ -15,7 +15,7 @@ const app = express();
 const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json());
-const interval = 5000; // Polling interval
+const interval = 5000; // Polling interval of 5 seconds
 let trackedRepo = null; // Set at the end of /track-repo route
 const APIHeader = {
     'Authorization': `token ${process.env.GITHUB_TOKEN}`,
@@ -28,7 +28,7 @@ app.listen(PORT, () => {
     startPolling();
 });
 
-// ------ Routes ------
+// ------ Routes ('/track-repo', '/commits/:owner/:repo')------
 /**
  * /track-repo handles querying the GitHub API, to store data into the database <br>
  * It works by requesting the latest 5 commits from the repository <br>
@@ -52,15 +52,12 @@ app.post('/track-repo', async (req, res) => {
         // Get 5 latest commits.
         // Includes `sha`, and (not guaranteed) author.name, author.login (username) & author.date
         // Details like additions, deletions and files changed are retrieved using the `sha` with helper-method `insertCommitDetails()`
-        console.log('GitHub token:', process.env.GITHUB_TOKEN);
         const latestResponse = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits`, {
             headers: APIHeader,
             params: { per_page: 5 },
         });
-
         const latestCommits = latestResponse.data;
         let newShas = [];
-
         // Checking if they already are in database by comparing sha 's
         for (const commit of latestCommits) {
             const sha = commit.sha;
@@ -83,19 +80,19 @@ app.post('/track-repo', async (req, res) => {
         } else {
             console.log(`[${fullRepo}] No new commits.`);
         }
-
         // Regardless of new commits/history, start polling afterward
         trackedRepo = fullRepo;
         res.json({ message: `Tracking started for ${fullRepo}` });
-
     } catch (err) {
         console.error(`Error during tracking for ${fullRepo}:`, err.response?.data?.message || err.message);
         res.status(500).json({ error: 'Tracking failed' });
     }
 });
 
-// This one handles getting commit data from the database, to present it to the client
-// The frontend can then calculate other statistics (author and contribution stats) from this raw data.
+/**
+ * This route handles getting commit data from the database, to present it to the client <br>
+ * The frontend can then calculate other statistics (author and contribution stats) from this raw data.
+ */
 app.get('/commits/:owner/:repo', async (request, response) => {
     // Formats the request parameters into format that matches the table field in prisma
     const { owner, repo } = request.params;
@@ -109,23 +106,33 @@ app.get('/commits/:owner/:repo', async (request, response) => {
     response.json(commits);
 });
 
-// ----- Helper methods -----
+// ----- Helper methods (fetchFullHistory, addMissingStats, insertCommitDetails, startPolling) -----
+/**
+ * If the latest five commits fetched are not present in the database,
+ * this method will loop through requesting 10 commits from the repository at a time,
+ * requesting additions/deletions for them,
+ * and inserting them into the database.
+ * @param owner
+ * @param repo
+ * @param fullRepo
+ * @returns {Promise<void>}
+ */
 async function fetchFullHistory(owner, repo, fullRepo) {
-    function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+    function sleep(ms) { // Helper-function to wait 10 seconds inbetween each API request. Without it, it will send 100s of requests on big public repos
+        return new Promise(resolve => setTimeout(resolve, ms)); // Already accidentally got quarantined once. A true learning experience.
     }
     let page = 1;
     const perPage = 10;
     let hasMore = true;
-    // Continuously requests 100 results (commits) per page, increasing page number by 1 every iteration
-    // If the retrieved page has 100 results, `hasMore` stays true and the iteration continues
+    // Continuously requests 10 results (commits) per page, increasing page number by 1 every iteration
+    // If the retrieved page has 10 results, `hasMore` stays true and the iteration continues
     while (hasMore) {
         const response = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits`, {
             headers: APIHeader,
             params: { per_page: perPage, page },
         });
         const commits = response.data;
-        if (commits.length === 0) break; // break loop if empty page returned, such as edge cases where a repo has exactly 200/300/400... commits
+        if (commits.length === 0) break; // break loop if empty page returned, such as edge cases where a repo has exactly 20/30/40... commits
         // Iterate through returned commits, comparing sha to see if it is in database, and if not, add it to database
         for (const commit of commits) {
             const sha = commit.sha;
@@ -140,51 +147,84 @@ async function fetchFullHistory(owner, repo, fullRepo) {
     }
 }
 
-// In the event the database have stored all commits, but for some reason didn't
-// store them correctly (development, yay), this will fill out the missing details like additions and deletions,
-// used for frontend charts and stats.
+/**
+ * In the event the database have stored all commits, but for some reason didn't <br>
+ * store them correctly (development, yay), this will fill out the missing details like additions and deletions, <br>
+ * used for frontend charts and stats.
+ * @param owner
+ * @param repo
+ * @param fullRepo
+ * @returns {Promise<void>}
+ */
 async function addMissingStats(owner, repo, fullRepo) {
     const incompleteCommits = await prisma.repoCommit.findMany({
         where: {
             repo: fullRepo,
             OR: [
-                { additions: { equals: null } },
-                { deletions: { equals: null } },
+                { additions: null },
+                { deletions: null },
             ],
         },
         select: { sha: true }
     });
-
     for (const { sha } of incompleteCommits) {
         await insertCommitDetails(owner, repo, sha, fullRepo);
     }
-
     console.log(`Backfilled ${incompleteCommits.length} incomplete commits for ${fullRepo}`);
 }
 
-// Commits are initially retrieved with just sha, message and maybe author details.
-// This method uses the ´sha` to retrieve the details used for analysis/presentation in frontend
-// And actually inserts new commits into the database
+/**
+ * Commits are initially retrieved with just sha, message and maybe author details. <br>
+ * This method uses the ´sha` to retrieve the details used for analysis/presentation in frontend. <br
+ * And actually inserts new commits into the database. <br>
+ * Furthermore it filters out files and folders of compilation- and dependency-installation -related data like package-lock.json, og /target/ folders. <br>
+ * @param owner
+ * @param repo
+ * @param sha
+ * @param fullRepo
+ * @returns {Promise<void>}
+ */
 async function insertCommitDetails(owner, repo, sha, fullRepo) {
     try {
         const detail = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`, {
             headers: APIHeader,
         });
-        const stats = detail.data.stats;
+
         const author = detail.data.commit?.author?.name || 'Unknown';
         const timestamp = new Date(detail.data.commit?.author?.date || Date.now());
 
+        const files = detail.data.files || [];
+        const ignoredPatterns = [
+            /^package-lock\.json$/,      // exactly "package-lock.json"
+            /^.*\/package-lock\.json$/,  // "some/dir/package-lock.json"
+            /^target\//,                 // any file inside /target/
+            /^dist\//,                   // common for build outputs
+            /^\.next\//,                 // Next.js build
+            /^build\//,
+            /^coverage\//,
+        ];
+        // Filter out files that match any ignore pattern, and then counts additions and deletions in remaining files (for said commit)
+        const isIgnored = (filename) => ignoredPatterns.some(pattern => pattern.test(filename));
+        let additions = 0;
+        let deletions = 0;
+        for (const file of files) {
+            const filename = file.filename || '';
+            if (!isIgnored(filename)) {
+                additions += file.additions || 0;
+                deletions += file.deletions || 0;
+            }
+        }
+        // And lastly inserts into database with prisma
         await prisma.repoCommit.create({
             data: {
                 sha,
                 repo: fullRepo,
                 author,
                 timestamp,
-                additions: stats?.additions || 0,
-                deletions: stats?.deletions || 0,
+                additions,
+                deletions,
             },
         });
-
         console.log(`Inserted commit ${sha} from ${fullRepo}`);
     } catch (err) {
         console.error(`Error inserting commit ${sha}:`, err.response?.data?.message || err.message);
@@ -202,7 +242,7 @@ function startPolling() {
                 const response = await axios.get(`https://api.github.com/repos/${owner}/${repo}/commits`, {
                     headers: APIHeader,
                     params: {
-                        per_page: 5, // Fetch latest 5
+                        per_page: 5,
                     },
                 });
                 // For each commit, check if the `sha` is in database. If not, add the commit to db

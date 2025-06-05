@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import axios from 'axios';
 import {
     LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer,
@@ -9,18 +9,22 @@ import {
  * @constructor
  */
 function App() {
-    const [repoInput, setRepoInput] = useState(''); // Used for keeping track of repo name
-    const [repoStats, setRepoStats] = useState(null);
+    const [repoInput, setRepoInput] = useState(''); // String used for keeping track of repo name
+    const [repoStats, setRepoStats] = useState(null); // Holds information related to each author contributing to the repo
     const [repoTracked, setRepoTracked] = useState(false); // Boolean to control whether to show repo info
     const [commits, setCommits] = useState([]);
     const [chartData, setChartData] = useState([]);
     const [totalLines, setTotalLines] = useState();
+    const pollingIntervalTime = 5000;
     const pollingInterval = useRef(null);
 
-    // Requests the backend to do the API call
-    // First fetches the existing commits from DB (if any exist) to immediately present to user
-    // Meanwhile the backend corresponds with GitHub API to retrieve new commits,
-    // which are then immediately added to/replace the list of five most recent commits.
+    /**
+     * Requests the backend to do the API call <br>
+     * First fetches the existing commits from DB (if any exist) to immediately present to user <br>
+     * Meanwhile the backend corresponds with GitHub API to retrieve new commits, <br>
+     * which are then immediately added to/replace the list of five most recent commits. <br>
+     * @returns {Promise<void>}
+     */
     const startTrackingRepo = async () => {
         const [owner, repo] = repoInput.split('/');
         if (!owner || !repo) {
@@ -39,24 +43,49 @@ function App() {
         }
     };
 
+    /**
+     * Sets up a repeating poll to server backend for new commits
+     * Called on user pressing Track Repository, after successfully getting a response from the repo
+     * @param owner
+     * @param repo
+     */
+    const startPolling = (owner, repo) => {
+        if (pollingInterval.current) return;
+
+        pollingInterval.current = setInterval(() => {
+            pollCommits(owner, repo);
+        }, pollingIntervalTime);
+    };
+
+    /**
+     * Requests a response from the backend regarding new commits, <br>
+     * then sorts them by time, with newest first, <br>
+     * and then paste that data into the other methods handling data analysis and presentation.
+     * Repeated every 5 seconds.
+     * @param owner
+     * @param repo
+     * @returns {Promise<void>}
+     */
     const pollCommits = async (owner, repo) => {
         try {
             const response = await axios.get(`http://localhost:4000/commits/${owner}/${repo}`);
             const sorted = [...response.data].sort(
                 (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
             );
-            // if (sorted.length === 0) return; // Guard against empty commits, to protect percentage numbers
-
             setCommits(sorted);
             generateChartData(sorted);
-            // const stats = computeStats(sorted);
-            // setRepoStats(stats);
             setRepoStats(computeStats(sorted));
         } catch (err) {
             console.error('Polling error:', err);
         }
     };
 
+    /**
+     * Computes stats related to each author contributing to the repository. <br>
+     * Returns the data used in the right-side block of the frontend (everything under "Author contributions")
+     * @param commits
+     * @returns {{totalCommits: *, authors: {additions: *, deletions: *, author: *, changePercent: string, commits: *, commitPercent, avgLinesChanged}[]}|{totalCommits: number, authors: *[]}}
+     */
     const computeStats = (commits) => {
         if (!commits || commits.length === 0) { // Guard against empty commits (which happens whenever a poll doesn't return a commit)
             return { totalCommits: 0, authors: [] }; // Needed to not reset percentage numbers
@@ -105,14 +134,19 @@ function App() {
         return { totalCommits, authors };
     };
 
-
+    /**
+     * Takes the list of commits (containing info on date, author, additions/deletions) and: <br>
+     * 1) Compiles the accumulated number of lines added for each date and adds it to the chart
+     * 2) Returns the final accumulated number, to display in the right-side "Approximate repo size:" field under Repository Summary
+     * @param commitList
+     * @returns {number}
+     */
     const generateChartData = (commitList) => {
         let totalLines = 0;
         const sortedCommits = [...commitList].sort(
             (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
         );
-
-        if (sortedCommits.length === 0) {
+        if (sortedCommits.length === 0) { // Guard in case no commits were added (This is repeatedly run when polling, and this guard prevents the chart being cleared)
             setChartData([]);
             return 0;
         }
@@ -135,35 +169,19 @@ function App() {
 
         const cursor = new Date(firstDate);
         let lastValue = 0;
-
         while (cursor <= lastDate) {
             const dateKey = cursor.toISOString().split('T')[0];
             const displayDate = cursor.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-
             if (linesPerDay.has(dateKey)) {
                 lastValue = linesPerDay.get(dateKey);
             }
-
             data.push({ name: displayDate, lines: lastValue });
-
             cursor.setDate(cursor.getDate() + 1);
         }
-
         setChartData(data);
         setTotalLines(totalLines);
-        return totalLines; // allow this to be passed back to computeStats
+        return totalLines; // Used for Repository Summary -> "Approximate repo size"
     };
-
-
-    const startPolling = (owner, repo) => {
-        if (pollingInterval.current) return;
-
-        pollingInterval.current = setInterval(() => {
-            pollCommits(owner, repo);
-        }, 5000);
-    };
-
-    // Hook to update the repo stats from historical data, even though no new commits have come in
 
     return (
         <div style={{
