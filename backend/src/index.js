@@ -94,7 +94,8 @@ app.post('/track-repo', async (req, res) => {
     }
 });
 
-// This one handles getting the data from the database, to present it to the client
+// This one handles getting commit data from the database, to present it to the client
+// The frontend can then calculate other statistics (author and contribution stats) from this raw data.
 app.get('/commits/:owner/:repo', async (request, response) => {
     // Formats the request parameters into format that matches the table field in prisma
     const { owner, repo } = request.params;
