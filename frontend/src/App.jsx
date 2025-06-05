@@ -13,22 +13,27 @@ function App() {
     const pollingInterval = useRef(null);
 
     // Requests the backend to do the API call
+    // First fetches the existing commits from DB (if any exist) to immediately present to user
+    // Meanwhile the backend corresponds with GitHub API to retrieve new commits,
+    // which are then immediately added to/replace the list of five most recent commits.
     const startTrackingRepo = async () => {
         const [owner, repo] = repoInput.split('/');
         if (!owner || !repo) {
             alert('Please enter repo in format owner/repo');
             return;
         }
+        await pollCommits(owner, repo); // Show current data right away
+        setRepoTracked(true); // Show the UI section even if empty
+
         try {
             await axios.post('http://localhost:4000/track-repo', { owner, repo });
-            setRepoTracked(true);
-            pollCommits(owner, repo); // First fetch
-            startPolling(owner, repo); // Begin polling loop
+            startPolling(owner, repo);
         } catch (err) {
             console.error('Tracking error:', err);
             alert('Error starting tracking. Check console.');
         }
     };
+
 
     const pollCommits = async (owner, repo) => {
         try {
@@ -67,11 +72,13 @@ function App() {
                     ) : (
                         <ul>
                             {commits.map((commit) => (
-                                <li key={commit.sha} style={{ marginBottom: '1rem' }}>
-                                    <strong>Author:</strong> {commit.author}<br />
-                                    <strong>Date:</strong> {new Date(commit.timestamp).toLocaleString()}<br />
-                                    <strong>SHA:</strong> {commit.sha}<br />
-                                    <strong>+{commit.additions} / -{commit.deletions}</strong>
+                                <li key={commit.sha} style={{marginBottom: '1rem'}}>
+                                    <strong>Author:</strong> {commit.author}<br/>
+                                    <strong>Date:</strong> {new Date(commit.timestamp).toLocaleString()}<br/>
+                                    <strong>SHA:</strong> {commit.sha}<br/>
+                                    <strong style={{color: 'green'}}>+{commit.additions}</strong>
+                                    <span> / </span>
+                                    <strong style={{color: 'red'}}>-{commit.deletions}</strong>
                                 </li>
                             ))}
                         </ul>

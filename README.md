@@ -40,3 +40,5 @@ from which data is requested by the user, where the server then retrieves it fro
    npm run dev
     ```
 5. Visit frontend at http://localhost:5173/
+
+6. Test with ```PatrickAbildHolmes/i4-simulated-lab```
