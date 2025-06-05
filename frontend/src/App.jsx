@@ -114,39 +114,46 @@ function App() {
 
         if (sortedCommits.length === 0) {
             setChartData([]);
-            return;
+            return 0;
         }
 
-        const firstDate = new Date(sortedCommits[0].timestamp);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        // Map date (yyyy-mm-dd) => total lines
+        // Create date => totalLines map (as of the last commit that day)
         const linesPerDay = new Map();
+
         sortedCommits.forEach((commit) => {
-            const dateKey = new Date(commit.timestamp).toISOString().split('T')[0]; // yyyy-mm-dd
+            const commitDate = new Date(commit.timestamp);
+            const dateKey = commitDate.toISOString().split('T')[0]; // yyyy-mm-dd
             totalLines += commit.additions - commit.deletions;
-            linesPerDay.set(dateKey, totalLines);
+            linesPerDay.set(dateKey, totalLines); // overwrite ensures last commit of day wins
         });
 
+        // Generate full date range for chart
         const data = [];
+        const allDates = Array.from(linesPerDay.keys()).sort(); // all commit days
+        const firstDate = new Date(allDates[0]);
+        const lastDate = new Date(allDates[allDates.length - 1]);
+
         const cursor = new Date(firstDate);
-        while (cursor <= today) {
+        let lastValue = 0;
+
+        while (cursor <= lastDate) {
             const dateKey = cursor.toISOString().split('T')[0];
-            const displayDate = cursor.toLocaleDateString();
+            const displayDate = cursor.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
-            // Use the latest totalLines up to that day
-            const value = linesPerDay.has(dateKey)
-                ? linesPerDay.get(dateKey)
-                : (data.length > 0 ? data[data.length - 1].lines : 0);
+            if (linesPerDay.has(dateKey)) {
+                lastValue = linesPerDay.get(dateKey);
+            }
 
-            data.push({ name: displayDate, lines: value });
+            data.push({ name: displayDate, lines: lastValue });
 
-            cursor.setDate(cursor.getDate() + 1); // go to next day
+            cursor.setDate(cursor.getDate() + 1);
         }
+
         setChartData(data);
         setTotalLines(totalLines);
+        return totalLines; // allow this to be passed back to computeStats
     };
+
 
     const startPolling = (owner, repo) => {
         if (pollingInterval.current) return;
